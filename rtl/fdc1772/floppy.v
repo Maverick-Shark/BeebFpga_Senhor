@@ -27,16 +27,18 @@ module floppy (
 	input        step_in,
 	input        step_out,
 
-	input [10:0] sector_len,
+	input        inserted,
+	input  [1:0] sector_size_code,
 	input        sector_base,    // number of first sector on track (archie 0, dos 1)
-	input  [4:0] spt,            // sectors/track
+	input  [5:0] spt,            // sectors/track
 	input  [9:0] sector_gap_len, // gap len/sector
 	input        hd,
+	input        ed,
 	input        fm,
 
-	output 	    dclk_en,      // data clock enable
+	output 	     dclk_en,      // data clock enable
 	output [6:0] track,        // number of track under head
-	output [4:0] sector,       // number of sector under head, 0 = no sector
+	output [5:0] sector,       // number of sector under head, 0 = no sector
 	output       sector_hdr,   // valid sector header under head
 	output       sector_data,  // valid sector data under head
 	       
@@ -55,6 +57,7 @@ assign sector_data = (sec_state == SECTOR_STATE_DATA);
 localparam RATESD          = 125000;
 localparam RATEDD          = 250000;
 localparam RATEHD          = 500000;
+localparam RATEED          = 1000000;
 localparam RPM             = 300;
 localparam STEPBUSY        = 18;    // 18ms after step data can be read
 localparam SPINUP          = 500;   // drive spins up in up to 800ms
@@ -73,9 +76,13 @@ localparam TRACKS          = 85;    // max allowed track
 localparam BPTSD = RATESD*60/(8*RPM);
 localparam BPTDD = RATEDD*60/(8*RPM);
 localparam BPTHD = RATEHD*60/(8*RPM);
+localparam BPTED = RATEED*60/(8*RPM);
+
+wire [31:0] DISK_RATE = fm ? RATESD : ed ? RATEED : hd ? RATEHD : RATEDD;
+wire [31:0] DISK_BPT  = fm ? BPTSD : ed ? BPTED : hd ? BPTHD : BPTDD;
 
 // report disk ready if it spins at full speed
-assign ready = select && (rate == (fm ? RATESD : hd ? RATEHD : RATEDD));
+assign ready = select && (rate == DISK_RATE);
 
 // ================================================================
 // ========================= INDEX PULSE ==========================
@@ -84,7 +91,7 @@ assign ready = select && (rate == (fm ? RATESD : hd ? RATEHD : RATEDD));
 // Index pulse generation. Pulse starts with the begin of index_pulse_start
 // and lasts INDEX_PULSE_CYCLES system clock cycles
 localparam INDEX_PULSE_CYCLES = INDEX_PULSE_LEN * CLK_EN;
-reg [18:0] index_pulse_cnt;
+reg [19:0] index_pulse_cnt;
 always @(posedge clk) if(clk8m_en) begin
 	if(index_pulse_start && (index_pulse_cnt == INDEX_PULSE_CYCLES-1)) begin
 		index <= 1'b0;
@@ -144,11 +151,11 @@ localparam SECTOR_STATE_HDR  = 2'd1;
 localparam SECTOR_STATE_DATA = 2'd2;
 
 // we simulate an interleave of 1
-reg [4:0] start_sector = 4'd1;
+reg [5:0] start_sector = 6'd1;
 
 reg [1:0] sec_state;
 reg [9:0] sec_byte_cnt;  // counting bytes within sectors
-reg [4:0] current_sector = 4'd1;
+reg [5:0] current_sector = 6'd1;
   
 always @(posedge clk) begin
 	if (byte_clk_en) begin
@@ -166,7 +173,7 @@ always @(posedge clk) begin
 	   
 				SECTOR_STATE_HDR: begin
 					sec_state <= SECTOR_STATE_DATA;
-					sec_byte_cnt <= sector_len[9:0]-1'd1;
+					sec_byte_cnt <= (10'd128 << sector_size_code) - 1'd1;
 				end
 	   
 				SECTOR_STATE_DATA: begin
@@ -200,7 +207,7 @@ always @(posedge clk) begin
 	if (byte_clk_en) begin
 		index_pulse_start <= 1'b0;
 
-		if(byte_cnt == ((fm ? BPTSD : hd ? BPTHD : BPTDD)-1'd1)) begin
+		if(byte_cnt == (DISK_BPT - 1'd1)) begin
 			byte_cnt <= 0;
 			index_pulse_start <= 1'b1;
 		end else
@@ -245,21 +252,21 @@ always @(posedge clk) begin
 	if(motor_onD != motor_on_sel)
 		spin_up_counter <= 32'd0;
 	else if(clk8m_en) begin
-		spin_up_counter <= spin_up_counter + (fm ? RATESD : hd ? RATEHD : RATEDD);
+		spin_up_counter <= spin_up_counter + DISK_RATE;
       
 		if(motor_on_sel) begin
 			// spinning up
 			if(spin_up_counter > SPIN_UP_CLKS) begin
-				if(rate < (fm ? RATESD : hd ? RATEHD : RATEDD))
+				if(rate < DISK_RATE)
 					rate <= rate + 32'd1;
-				spin_up_counter <= spin_up_counter - (SPIN_UP_CLKS - (fm ? RATESD : hd ? RATEHD : RATEDD));
+				spin_up_counter <= spin_up_counter - (SPIN_UP_CLKS - DISK_RATE);
 			end
 		end else begin
 			// spinning down
 			if(spin_up_counter > SPIN_DOWN_CLKS) begin
 				if(rate > 0)
 					rate <= rate - 32'd1;
-				spin_up_counter <= spin_up_counter - (SPIN_DOWN_CLKS - (fm ? RATESD : hd ? RATEHD : RATEDD));
+				spin_up_counter <= spin_up_counter - (SPIN_DOWN_CLKS - DISK_RATE);
 			end
 		end // else: !if(motor_on)
 	end // else: !if(motor_onD != motor_on)

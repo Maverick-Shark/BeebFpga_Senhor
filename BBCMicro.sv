@@ -169,7 +169,6 @@ module emu
 	input         OSD_STATUS
 );
 
-
 // Uncomment line below to reduce memory requirements by eliminating Co-processor CPU memory and sideways RAM
 // This option is required when building the ICEDebugger on the DE10 Nano. Otherwise, leave undefined.
 // `define use_small_memory
@@ -198,7 +197,6 @@ assign HDMI_FREEZE = 0;
 // assign SDRAM_DQ[5] = CLK_VIDEO;
 // assign SDRAM_DQ[6] = red_vid;
 
-
 wire [1:0] ar = status[14:13];
 video_freak video_freak
 (
@@ -224,6 +222,8 @@ video_freak video_freak
 // D-E   - Aspect ratio
 // F-G   - Image scaling
 // H      - Reserved - MMFS or Floppy
+// I-J (18-19) - Acorn Z80
+// K (20) - Z80 Speed
 // P-R (25-27) - MMFS V1 or V2
 // S (28)- M7 Video opt
 // T (29)- Master shadow video mode on boot
@@ -234,9 +234,14 @@ video_freak video_freak
 // 1 - DFS active
 // 2 - Master selected
 // 3 - Master selected and both MMFS and DFS active
+// 4 - Shows Acorn Z80 if Model B and DFS selected 
+// 5 - Shows Z80 Speed if MOdel B and Acorn Z80 active
 
 `include "build_id.v" 
 parameter AUTO_START_OPT = 12;
+parameter Z80_OPT_L = 18;
+parameter Z80_OPT_H = 19;
+parameter Z80_SPEED_OPT = 20;
 parameter FILE_SYS_OPT_L = 25;
 parameter FILE_SYS_OPT_H = 27;
 parameter M7_VIDEO_OPT = 28;
@@ -247,6 +252,7 @@ parameter CONF_STR = {
 	"BBCMicro;;",
 	"-;",
 	"OPR,Filesystem,MMFSv1,MMFSv2,DFS,MMFSv1&DFS,MMFSv2&DFS;",
+	//"h4F0,ROM,Load ROM;",
 	"h0S0,VHDIMGMMB;", // Allow .VHD or .MMB files to be loaded (MMFSv1) or .IMG (MMFS v2)
 	"h1S1,SSDDSD;",
 	"h1S2,SSDDSD;",
@@ -254,6 +260,8 @@ parameter CONF_STR = {
 	"-;",
 	"O4,Model,B(MOS6502),Master(R65SC12);",
 	"O56,Co-Processor,None,MOS65C02;",
+	"h4OIJ,Acorn Z80,Off,v1.20 ROM,v1.21 ROM;",
+	"h5OK,Z80 Speed,6 MHz,12 MHz;",
 	"O79,Default video mode,0,1,2,3,4,5,6,7;",
 	"h2OT,Default video mem.,Shadow,Main;",
 	"h3OU,Default Filesystem,MMFS,DFS;",
@@ -314,8 +322,7 @@ always @(negedge clk_sys) begin
 	div32 <= div32 + 1'd1;
 	if(div32 == 2) div32 <= 0;
 	ce_32 <= !div32;
-	
-	
+
 end
 
 
@@ -354,8 +361,10 @@ wire        sd_ack_conf;
 
 wire [64:0] RTC;
 
-hps_io #(.CONF_STR(CONF_STR),.VDNUM(3),.BLKSZ(2)) hps_io // IES Updated from c244
+wire       z80_menu = ~model_master & dfs;
+wire [1:0] z80_mode = z80_menu ? status[Z80_OPT_H:Z80_OPT_L] : 2'b00;
 
+hps_io #(.CONF_STR(CONF_STR),.VDNUM(3),.BLKSZ(2)) hps_io // IES Updated from c244
 
 (
 	.clk_sys(clk_sys),
@@ -365,7 +374,17 @@ hps_io #(.CONF_STR(CONF_STR),.VDNUM(3),.BLKSZ(2)) hps_io // IES Updated from c24
 
 	.buttons(buttons),
 	.status(status),
-	.status_menumask({(model_master && dfs && mmfs), model_master, dfs , mmfs}),
+
+	.status_menumask({
+		//z80_menu && |status[Z80_OPT_H:Z80_OPT_L],	// h5: Shows Z80 Speed if Model B or Accorn Z80 On
+		|z80_mode,							// h5: Shows Z80 Speed if Model B or Acorn Z80 On
+		z80_menu,							// h4: Shows AcornZ80 if Model B and DFS (or MMFS&DFS)
+		model_master && dfs && mmfs,		// h3: Shows Dflt Fs if Model Master amd DFS and MMFS
+		model_master,						// h2: Shows Shadow if Model Master
+		dfs,								// h1: Shows SSDDSD if DFS
+		mmfs								// h0: Shows VHDIMGMMB if mmfs
+	}),
+
 	.forced_scandoubler(forced_scandoubler),
 	.gamma_bus(gamma_bus),
 
@@ -400,7 +419,17 @@ hps_io #(.CONF_STR(CONF_STR),.VDNUM(3),.BLKSZ(2)) hps_io // IES Updated from c24
 
 /////////////////  RESET  /////////////////////////
 
-wire reset = RESET | status[0] | buttons[1] | (status[AUTO_START_OPT] & img_mounted);
+reg  [1:0] last_z80 = 0;
+reg [11:0] cfg_rst_cnt = 0;
+always @(posedge clk_sys) begin
+	last_z80 <= z80_mode;
+	if(last_z80 != z80_mode) cfg_rst_cnt <= 12'hFFF;
+	else if(cfg_rst_cnt != 0) cfg_rst_cnt <= cfg_rst_cnt - 12'd1;
+end
+
+wire rom_download = ioctl_download & ~|ioctl_index;
+
+wire reset = RESET | status[0] | buttons[1] | (status[AUTO_START_OPT] & img_mounted[0]) | (|cfg_rst_cnt) | rom_download;
 
 ////////////////  MEMORY  /////////////////////////
 
@@ -416,7 +445,7 @@ reg  [7:0] rom_dout;
 reg  [7:0] rom_data;
 
 (* ram_init_file = "roms/rom.mif" *) reg [7:0] rom[16 * 16384];
-always @(posedge clk_sys) if(!ioctl_index && ioctl_wr && reset) rom[reset ? ioctl_addr[17:0] : rom_addr[17:0]] <= ioctl_dout;
+always @(posedge clk_sys) if(!ioctl_index && ioctl_wr && reset && ioctl_addr < 25'd262144) rom[reset ? ioctl_addr[17:0] : rom_addr[17:0]] <= ioctl_dout;
 always @(posedge clk_sys) rom_dout <= rom[rom_addr[17:0]];
 
 
@@ -505,17 +534,42 @@ end
 
 reg [7:0] ram_dout;
 
+wire [15:0] z80_ram_addr;
+wire  [7:0] z80_ram_din;
+wire        z80_ram_wr;
+
 // See definition of use_small_memory for explanation
 `ifdef use_small_memory
 	reg [7:0] ram[5 * 16384];
 	always @(posedge clk_sys) if(mem_addr[18] & mem_addr[17] & old_we & ~mem_we_n) ram[mem_addr[16:0]] <= mem_din;
 	always @(posedge clk_sys) if(mem_addr[17]) ram_dout <= ram[mem_addr[16:0]]; else ram_dout <=0;
-`else
-	reg [7:0] ram[212992];
-	always @(posedge clk_sys) if(mem_addr[18] & old_we & ~mem_we_n) ram[mem_addr[17:0]] <= mem_din;
-	always @(posedge clk_sys) ram_dout <= ram[mem_addr[17:0]];
-`endif
 
+	wire       copro_area = 0;
+	wire [7:0] copro_dout = 0;
+`else
+	wire        copro_area = ~|mem_addr[17:16];
+	wire [17:0] ram_a      = &mem_addr[17:16] ? {6'b100000, mem_addr[11:0]} : mem_addr[17:0] - 18'h10000;
+
+	reg [7:0] ram[135168];
+	always @(posedge clk_sys) if(mem_addr[18] & ~copro_area & old_we & ~mem_we_n) ram[ram_a] <= mem_din;
+	always @(posedge clk_sys) ram_dout <= ram[ram_a];
+
+	// Shared Co-Processor RAM (CoPro6502 / Acorn Z80)
+	reg  [15:0] z80_addr_r;
+	reg   [7:0] z80_din_r;
+	reg         z80_wr_r;
+	always @(posedge clk_sys) {z80_addr_r, z80_din_r, z80_wr_r} <= {z80_ram_addr, z80_ram_din, z80_ram_wr};
+
+	wire        z80_en     = |z80_mode;
+	wire [15:0] copro_addr = z80_en ? z80_addr_r : mem_addr[15:0];
+	wire  [7:0] copro_din  = z80_en ? z80_din_r  : mem_din;
+	wire        copro_we   = z80_en ? z80_wr_r   : (mem_addr[18] & copro_area & old_we & ~mem_we_n);
+
+	reg [7:0] copro_dout;
+	reg [7:0] copro_ram[65536];
+	always @(posedge clk_sys) if(copro_we) copro_ram[copro_addr] <= copro_din;
+	always @(posedge clk_sys) copro_dout <= copro_ram[copro_addr];
+`endif
 
 reg old_we;
 always @(posedge clk_sys) old_we <= mem_we_n;
@@ -550,7 +604,6 @@ wire [7:0] joya_x = 8'hFF - {~ax[7],ax[6:0]};
 wire [7:0] joya_y = 8'hFF - {~ay[7],ay[6:0]};
 wire [7:0] joyb_x = 8'hFF - {~joy2_x[7],joy2_x[6:0]};
 wire [7:0] joyb_y = 8'hFF - {~joy2_y[7],joy2_y[6:0]};
-
 
 wire       ce_pix;
 
@@ -589,7 +642,7 @@ bbc_micro_core BBCMicro(
 	.ext_nWE(mem_we_n),
 	.ext_nCS(),
 	.ext_A(mem_addr),
-	.ext_Dout(mem_addr[18] ? ram_dout : rom_data),
+	.ext_Dout(mem_addr[18] ? (copro_area ? copro_dout : ram_dout) : rom_data),
 	.ext_Din(mem_din),
 
 	.SDMISO(sdmiso),
@@ -637,6 +690,12 @@ bbc_micro_core BBCMicro(
 	.cpu_addr(), // IES: Debugging
 	.m128_mode(m128),
 	.copro_mode(|status[6:5]),
+	.z80_mode(z80_mode),
+	.z80_speed(status[Z80_SPEED_OPT]),
+	.z80_ram_addr(z80_ram_addr),
+	.z80_ram_data_in(z80_ram_din),
+	.z80_ram_data_out(copro_dout),
+	.z80_ram_wr(z80_ram_wr),
 	
 	.img_mounted    ( img_mounted[2:1] ),
 	.img_size       ( img_size       ),
@@ -666,10 +725,8 @@ bbc_micro_core BBCMicro(
 	.test()
 );
 
-
 wire [31:0] fd_sd_lba;
 wire [7:0] fd_sd_buff_din;
-
 
 always @(posedge clk_48)
 begin
@@ -685,7 +742,6 @@ wire [7:0] audio_sn;
 
 assign AUDIO_MIX = 0;
 assign AUDIO_S = 1;
-
 
 wire [1:0] scale = status[3:2];
 
@@ -713,6 +769,7 @@ video_mixer #(640, 1, 1) mixer
 // Mode 7: When using progressive output then set VGA_F1 to 0, when using interlace output set VGA_F1 based on the interlace field
 assign VGA_F1 = (~clk_sel) & status[M7_VIDEO_OPT] & ~ odd_field;
 assign VGA_SL = scale ? scale - 1'd1 : 2'd0;
+
 
 //////////////////   SD   ///////////////////
 

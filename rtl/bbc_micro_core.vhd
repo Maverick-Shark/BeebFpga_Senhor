@@ -50,14 +50,10 @@
 -- INTON/INTOFF registers
 -- refactor NVRAM (146818 off System VIA Port A)
 
-
-
-
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.std_logic_unsigned.all;
 use ieee.numeric_std.all;
-
 
 entity bbc_micro_core is
     generic (
@@ -68,20 +64,21 @@ entity bbc_micro_core is
         IncludeCoPro6502   : boolean := true;  -- The three co pro options
         IncludeCoProSPI    : boolean := false; -- are currently mutually exclusive
         IncludeCoProExt    : boolean := false; -- (i.e. select just one)
+        IncludeCoProZ80    : boolean := true;
         IncludeVideoNuLA   : boolean := false; -- Not tested in this project
         UseOrigKeyboard    : boolean := false; -- Not tested in this project
-		  UseT65Core         : boolean := true;  -- Classic 6502 (for BBC B)
-		  UseAlanDCore       : boolean := true;  -- 65C02 (for BBC Master)
+		UseT65Core         : boolean := true;  -- Classic 6502 (for BBC B)
+		UseAlanDCore       : boolean := true;  -- 65C02 (for BBC Master)
         OverrideCMOS       : boolean := true   -- Overide CMOS/RTC mode settings with keyb_dip
     );
     port (
         -- Clocks
 		-- IES In MISTer only _32 and _24
- --       clock_27       : in    std_logic; -- IES Only used in scandouble
+ --     clock_27       : in    std_logic; -- IES Only used in scandouble
 		clksys         : in  std_logic; -- Used in FDC
         clock_32       : in    std_logic;
         clock_48       : in    std_logic; -- IES Master clock for many things
---        clock_96       : in    std_logic; -- IES Only used in scandouble
+ --     clock_96       : in    std_logic; -- IES Only used in scandouble
         clock_avr      : in    std_logic; -- IES Only used in ICEDebugger
 
         -- Hard reset (active low)
@@ -89,17 +86,17 @@ entity bbc_micro_core is
 		-- IES MISTer Also reset_req out <= not reset_n;
 
         -- Keyboard
---        ps2_kbd_clk    : inout std_logic;
---        ps2_kbd_data   : inout std_logic;
+ --     ps2_kbd_clk    : inout std_logic;
+ --     ps2_kbd_data   : inout std_logic;
 		mister_key       : in std_logic_vector (10 downto 0);
 
         -- Mouse
- --       ps2_mse_clk    : inout std_logic;
- --       ps2_mse_data   : inout std_logic;
+ --     ps2_mse_clk    : inout std_logic;
+ --     ps2_mse_data   : inout std_logic;
 		mister_mouse      : in  std_logic_vector (24 downto 0);
 
         -- Control input to exchange Keyboard and Mouse connections
---        ps2_swap       : in    std_logic := '0'; -- IES New
+ --     ps2_swap       : in    std_logic := '0'; -- IES New
 		
 		RTC            : in  std_logic_vector (64 downto 0);
 
@@ -110,8 +107,8 @@ entity bbc_micro_core is
         video_red      : out   std_logic_vector (3 downto 0);
         video_green    : out   std_logic_vector (3 downto 0);
         video_blue     : out   std_logic_vector (3 downto 0);
-		  video_vblank   : out   std_logic;
-		  video_hblank   : out   std_logic;
+        video_vblank   : out   std_logic;
+        video_hblank   : out   std_logic;
         video_vsync    : out   std_logic;
         video_hsync    : out   std_logic;
 		m7_video_opt   : in    std_logic;
@@ -158,7 +155,6 @@ entity bbc_micro_core is
         ext_keyb_ca2   : in    std_logic; -- IES New
         ext_keyb_pa7   : in    std_logic; -- IES New
 
-
         -- Config outputs (from PS/2 keyboard)
         ps2config         : out   std_logic_vector(9 downto 0); -- IES New
 
@@ -197,6 +193,14 @@ entity bbc_micro_core is
 
         -- Co Pro 6502 Mode
         copro_mode     : in    std_logic;
+
+        -- Acorn Z80 Co Pro
+        z80_mode         : in    std_logic_vector(1 downto 0);
+        z80_speed        : in    std_logic;
+        z80_ram_addr     : out   std_logic_vector(15 downto 0);
+        z80_ram_data_in  : out   std_logic_vector(7 downto 0);
+        z80_ram_data_out : in    std_logic_vector(7 downto 0);
+        z80_ram_wr       : out   std_logic;
 
         -- Co Pro SPI - slave interface
         p_spi_ssel     : in    std_logic;
@@ -253,11 +257,15 @@ end function;
 
 constant RGB_WIDTH : integer := calc_rgb_width(IncludeVideoNuLA);
 
+constant UseCoProZ80 : boolean := IncludeCoProZ80 and not IncludeICEDebugger;
+
 component fdc1772 is
 	generic (
 		CLK_EN              : integer := 4000;  -- old values tried with different ram/success : 42666000 42800000 42680000 42856000
-		--			CLK_EN           : integer := 2033;
-		EXT_MOTOR : integer := 1  -- 256 bytes/sector
+		-- CLK_EN           : integer := 2033;
+		MODEL               : integer := 2;     -- 0 - wd1770, 1 - fd1771, 2 - wd1772, 3 = wd1773/fd1793
+		EXT_MOTOR           : integer := 0;     -- != 0 if motor is controlled externally by floppy_motor
+		INVERT_HEAD_RA      : integer := 1      -- != 0 - invert head in READ_ADDRESS reply
 	);
 	port (
 		clksys           : in  std_logic;
@@ -280,22 +288,45 @@ component fdc1772 is
 		cpu_din          : in  std_logic_vector( 7 downto 0);
 		cpu_dout         : out std_logic_vector( 7 downto 0);
 
+		img_type         : in  std_logic_vector( 2 downto 0);
 		img_mounted      : in  std_logic_vector( 1 downto 0);
 		img_wp           : in  std_logic_vector( 1 downto 0);
+		img_ds           : in  std_logic;
 		img_size         : in  std_logic_vector(31 downto 0); -- in bytes
 
 		sd_lba           : out std_logic_vector(31 downto 0);
 		sd_rd            : out std_logic_vector( 1 downto 0);
 		sd_wr            : out std_logic_vector( 1 downto 0);
---			sd_ack           : in  std_logic_vector( 1 downto 0);
+ --		sd_ack           : in  std_logic_vector( 1 downto 0);
 		sd_ack           : in  std_logic;
 		sd_buff_addr     : in  std_logic_vector( 8 downto 0);
 		sd_dout          : in  std_logic_vector( 7 downto 0);
 		sd_din           : out std_logic_vector( 7 downto 0);
 		sd_dout_strobe   : in  std_logic
---			drive_led		  : out std_logic
+ --		drive_led		 : out std_logic
 	);
 end component ;
+
+component CoProZ80 is
+	port (
+		h_clk            : in  std_logic;
+		h_cs_b           : in  std_logic;
+		h_rdnw           : in  std_logic;
+		h_addr           : in  std_logic_vector( 2 downto 0);
+		h_data_in        : in  std_logic_vector( 7 downto 0);
+		h_data_out       : out std_logic_vector( 7 downto 0);
+		h_rst_b          : in  std_logic;
+		h_irq_b          : out std_logic;
+		clk_cpu          : in  std_logic;
+		cpu_clken        : in  std_logic;
+		rom_sel          : in  std_logic;
+		ram_addr         : out std_logic_vector(15 downto 0);
+		ram_data_in      : out std_logic_vector( 7 downto 0);
+		ram_data_out     : in  std_logic_vector( 7 downto 0);
+		ram_wr           : out std_logic;
+		test             : out std_logic_vector( 7 downto 0)
+	);
+end component;
 
 
 -------------
@@ -583,6 +614,12 @@ signal tube_ram_addr    :   std_logic_vector(15 downto 0);
 signal tube_ram_data_in :   std_logic_vector(7 downto 0);
 signal ext_tube_clk     :   std_logic;
 
+-- Acorn Z80
+signal acorn_z80_en     :   std_logic;
+signal acorn_z80_active :   std_logic;
+signal acorn_z80_do     :   std_logic_vector(7 downto 0);
+signal z80_clken        :   std_logic;
+
 -- Memory enables
 signal ram_enable       :   std_logic;      -- 0x0000
 signal rom_enable       :   std_logic;      -- 0x8000 (BASIC/sideways ROMs)
@@ -642,6 +679,7 @@ signal floppy_side      : std_logic;
 --signal floppy_density   : std_logic;
 signal floppy_motor     : std_logic;
 signal floppy_reset     : std_logic;
+signal fdc_img_ds       : std_logic;
 
 -- 0xFE34 Access Control
 signal acccon          : std_logic_vector(7 downto 0);
@@ -1238,6 +1276,44 @@ begin
     end generate;
 
 --------------------------------------------------------
+-- Acorn Z80 Co Processor
+--------------------------------------------------------
+
+    GenCoProZ80: if UseCoProZ80 generate
+        signal acorn_z80_cs_b : std_logic;
+    begin
+        copro_z80 : CoProZ80
+        port map (
+            h_clk        => clock_48,
+            h_cs_b       => acorn_z80_cs_b,
+            h_rdnw       => cpu_r_nw,
+            h_addr       => cpu_a(2 downto 0),
+            h_data_in    => cpu_do,
+            h_data_out   => acorn_z80_do,
+            h_rst_b      => reset_n,
+            h_irq_b      => open,
+            clk_cpu      => clock_48,
+            cpu_clken    => z80_clken,
+            rom_sel      => z80_mode(1),
+            ram_addr     => z80_ram_addr,
+            ram_data_in  => z80_ram_data_in,
+            ram_data_out => z80_ram_data_out,
+            ram_wr       => z80_ram_wr,
+            test         => open
+        );
+        acorn_z80_cs_b <= '0' when acorn_z80_active = '1' and cpu_clken = '1' else '1';
+    end generate;
+
+    GenNotCoProZ80: if not UseCoProZ80 generate
+        acorn_z80_do    <= x"FE";
+        z80_ram_addr    <= (others => '0');
+        z80_ram_data_in <= (others => '0');
+        z80_ram_wr      <= '0';
+    end generate;
+
+    acorn_z80_en <= (z80_mode(1) or z80_mode(0)) when UseCoProZ80 else '0';
+
+--------------------------------------------------------
 -- Optional SPI Co Processor
 --------------------------------------------------------
 
@@ -1367,10 +1443,10 @@ begin
 
     -- Keyboard and System VIA and Video are by a power up reset signal
     -- Rest of system is reset by all of the above plus keyboard BREAK key
-	 -- Syncronise the reset to cpu_clken. This seems to be needed for reliable
-	 -- operation of the Alan D core. I think without this, depending on when
-	 -- reset is release, there may be too short a time to read the the first
-	 -- byte of the reset vector from slow FLASH (on the Altera DE1).
+	-- Syncronise the reset to cpu_clken. This seems to be needed for reliable
+	-- operation of the Alan D core. I think without this, depending on when
+	-- reset is release, there may be too short a time to read the the first
+	-- byte of the reset vector from slow FLASH (on the Altera DE1).
     sync_reset: process(clock_48)
     begin
         if rising_edge(clock_48) then
@@ -1460,6 +1536,13 @@ begin
                 mhz6_clken <= '1';
             else
                 mhz6_clken <= '0';
+            end if;
+
+            -- Acorn Z80 clock enable (6/12 MHz)
+            if div8_counter(1 downto 0) = 3 and (z80_speed = '1' or div8_counter(2) = '1') then
+                z80_clken <= '1';
+            else
+                z80_clken <= '0';
             end if;
 
             -- 4MHz clock enable
@@ -1582,7 +1665,8 @@ begin
     -- CPU accordingly
     mhz1_enable <= io_fred or io_jim or
         adc_enable or sys_via_enable or user_via_enable or mouse_via_enable or
-        serproc_enable or acia_enable or crtc_enable;
+        serproc_enable or acia_enable or crtc_enable or
+        (not m128_mode and (fdc_enable or fdcon_enable));
 
 
     -- FRED address demux
@@ -1615,7 +1699,7 @@ begin
     -- 0xFEA0 - 0xFEBF = 68B54 ADLC for Econet
     -- 0xFEC0 - 0xFEDF = uPD7002 ADC
     -- 0xFEE0 - 0xFEFF = Tube ULA
-    process(cpu_a,io_sheila,m128_mode,copro_mode,cpu_r_nw,acc_itu)
+    process(cpu_a,io_sheila,m128_mode,copro_mode,cpu_r_nw,acc_itu,acorn_z80_en)
     begin
         -- All regions normally de-selected
 		test_fe80 <= '0';
@@ -1633,6 +1717,7 @@ begin
         adc_enable <= '0';
         int_tube_enable <= '0';
         ext_tube_enable <= '0';
+        acorn_z80_active <= '0';
         acccon_enable <= '0';
         intoff_enable <= '0';
         inton_enable  <= '0';
@@ -1719,7 +1804,9 @@ begin
                         adc_enable <= '1';
                     end if;
                 when "111" =>                           -- 0xFEE0
-                    if copro_mode = '1' then
+                    if acorn_z80_en = '1' then
+                        acorn_z80_active <= '1';
+                    elsif copro_mode = '1' then
                         if m128_mode = '1' then
                             -- On the Master the ITU bit in ACCCON selects
                             -- between internal and external tube
@@ -1773,6 +1860,7 @@ begin
         -- Optional peripherals
         sid_do         when sid_enable = '1' and IncludeSid else
         music5000_do   when io_jim = '1' and IncludeMusic5000 else
+        acorn_z80_do   when acorn_z80_active = '1' else
         tube_do        when int_tube_enable = '1' and (IncludeCoPro6502 or IncludeCoProSPI) else
         ext_tube_do    when ext_tube_enable = '1' and IncludeCoProExt else
         -- Master 128 additions
@@ -1929,6 +2017,13 @@ begin
 	 -- FDC
 
 	fdc : fdc1772
+	generic map
+	(
+		CLK_EN         => 4000,
+		MODEL          => 2,
+		EXT_MOTOR      => 0,
+		INVERT_HEAD_RA => 1
+	)
 	port map
 	(
 	   clksys => clksys,
@@ -1945,9 +2040,11 @@ begin
 		drq => fdc_drq,
 
 		-- The following signals are all passed in from the Top module
+		img_type => "010",
 		img_mounted => img_mounted,
 		img_size => img_size,
 		img_wp => "00",
+		img_ds => fdc_img_ds,
 
 		sd_lba => sd_lba,
 		sd_rd => sd_rd,
@@ -1961,7 +2058,7 @@ begin
 		floppy_drive => floppy_drive,
 		floppy_motor => not floppy_motor,
 		floppy_side =>  floppy_side,
-		floppy_reset => floppy_reset
+		floppy_reset => floppy_reset and reset_n
 
 	);
 
@@ -1997,13 +2094,13 @@ begin
         if reset_n = '0' then
 				floppy_drive <= "11";
 				floppy_side <= '0';
-				floppy_reset <= '0';
+				floppy_reset <= '1';
 			--	floppy_density <= '0';
 				floppy_motor<='0';
 
 				elsif rising_edge(clock_48) then
 				if (cpu_clken) then
---    fe24-fe27  FDC Latch      1770 Control latch
+				--  fe24-fe27  FDC Latch - 1770 Control latch
 					if (fdcon_enable ='1' and  cpu_r_nw='0') then
 						if (m128_mode = '1') then
 							floppy_drive <= not cpu_do(1) & not cpu_do(0) ;
@@ -2022,6 +2119,8 @@ begin
 				end if;
         end if;
     end process;
+
+    fdc_img_ds <= '1' when unsigned(img_size) > 204800 else '0';
 
     -- Address translation logic for calculation of display address
     process(crtc_ma,crtc_ra,disp_addr_offs)
@@ -2082,13 +2181,12 @@ begin
     -- CRTC
     sys_via_ca1_in <= crtc_vsync;
     sys_via_cb2_in <= crtc_lpstb;
-	 -- The Lightpen strobe is abused by Pharoah's Curse
+	-- The Lightpen strobe is abused by Pharoah's Curse
     -- see https://github.com/mattgodbolt/jsbeeb/issues/135
     crtc_lpstb <= sys_via_cb2_out when sys_via_cb2_oe_n = '0' else '1';
 	 
     -- Keyboard
     sys_via_ca2_in <= keyb_int;
-
 
     -- TODO more work needed here, but this might be enough
     sys_via_pa_in <= rtc_do when m128_mode = '1' and rtc_ce = '1' and rtc_ds = '1' and rtc_r_nw = '1' else

@@ -2,6 +2,14 @@
 
 Tested: Working Video 720p, 1080p & Sound
 
+**New Feature for Model B (by @Maverick-shark)**
+- z80 copro with 1770 FDC support (needs bbc-fdc.rom)
+
+**HowTo**
+-Select Model B from OSD and DFS as Filesystem
+-Activate Accorn Z80 selecting v1.20 or v1.21 ROM
+-Mount any cpm disk (.dsd)
+
 # BeebFpga_MiSTer
 
 An experiment in building a BBC Micro MiSTer core by using the [official core](https://github.com/MiSTer-devel/BBCMicro_MiSTer) harness with the updates in the [BeebFPGA](https://github.com/hoglet67/BeebFpga) emulation. The BeebFPGA is actively maintained and incorporates a range of improvements to the emulation over the official MiSTer Core.
